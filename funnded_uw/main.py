@@ -85,7 +85,7 @@ def poll_once(cfg, client, store) -> None:
 
 def cmd_run(cfg, once: bool) -> None:
     cfg.require_email()
-    client = Anthropic(api_key=cfg.anthropic_api_key or None)
+    client = Anthropic(api_key=cfg.anthropic_api_key or None, max_retries=4)
     store = Store(cfg.db_path)
     if cfg.dry_run:
         log.warning("DRY_RUN is on — analyses will be printed, not emailed. Set DRY_RUN=false to go live.")
@@ -151,7 +151,7 @@ def cmd_check(cfg) -> None:
 
 def cmd_analyze(cfg, files) -> None:
     """Dry-run a set of local statement files without touching email."""
-    client = Anthropic(api_key=cfg.anthropic_api_key or None)
+    client = Anthropic(api_key=cfg.anthropic_api_key or None, max_retries=4)
     attachments = []
     for f in files:
         path = Path(f)
