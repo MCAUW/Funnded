@@ -17,7 +17,7 @@ log = logging.getLogger("funnded_uw")
 MAX_ATTEMPTS = 3
 
 MANUAL_REVIEW_NOTE = (
-    "This deal could not be auto-analyzed and needs manual underwriting.\n"
+    "SYSTEM FAILURE — please resubmit or manually review.\n"
     "Reason: {reason}\n"
 )
 
