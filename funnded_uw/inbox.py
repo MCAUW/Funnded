@@ -42,12 +42,22 @@ class Inbox:
         self.conn = None
 
     def __enter__(self):
+        self._connect()
+        return self
+
+    def _connect(self):
         self.conn = imaplib.IMAP4_SSL(self.cfg.imap_host, self.cfg.imap_port)
         self.conn.login(self.cfg.email_address, self.cfg.email_password)
         status, _ = self.conn.select(self.cfg.imap_folder)
         if status != "OK":
             raise RuntimeError(f"Could not open IMAP folder {self.cfg.imap_folder!r}")
-        return self
+
+    def _reconnect(self):
+        try:
+            self.conn.logout()
+        except Exception:
+            pass
+        self._connect()
 
     def __exit__(self, *exc):
         try:
@@ -73,7 +83,13 @@ class Inbox:
         return submissions
 
     def mark_seen(self, uid: bytes) -> None:
-        self.conn.uid("store", uid, "+FLAGS", "(\\Seen)")
+        # A long analysis can outlive the IMAP socket (the server hangs up on
+        # idle connections); reconnect once and retry rather than crash.
+        try:
+            self.conn.uid("store", uid, "+FLAGS", "(\\Seen)")
+        except (imaplib.IMAP4.abort, OSError):
+            self._reconnect()
+            self.conn.uid("store", uid, "+FLAGS", "(\\Seen)")
 
 
 def parse_submission(uid: bytes, raw: bytes) -> Submission:

@@ -107,35 +107,49 @@ def _fill_and_submit(page, name: str, party_type: str, first_name: str) -> None:
         field = _first_visible(
             page,
             [
-                page.get_by_label(re.compile(r"business|company|organi[sz]ation", re.I)),
+                page.locator("[aria-labelledby*='Business' i] input:visible, [aria-labelledby*='Company' i] input:visible"),
                 page.locator("input[name*=business i], input[id*=business i]"),
                 page.locator("input[name*=org i], input[id*=org i]"),
+                page.get_by_role("textbox", name=re.compile(r"business|company|organi[sz]ation", re.I)),
             ],
         )
         if field is None:
             raise NyscefError("could not find the business-name field on the search form")
         field.fill(name)
     else:
-        last = _first_visible(
-            page,
-            [
-                page.get_by_label(re.compile(r"last\s*name", re.I)),
-                page.locator("input[name*=last i], input[id*=last i]"),
-            ],
-        )
-        if last is None:
-            raise NyscefError("could not find the last-name field on the search form")
-        last.fill(name)
-        if first_name:
-            first = _first_visible(
+        # The person-name fields live inside a grouped panel
+        # (<div role="group" aria-labelledby="SearchByPersonNameLabel">) —
+        # target the inputs inside it, not the group itself.
+        group = page.locator("[aria-labelledby*='PersonName' i], [aria-labelledby*='PartyName' i]")
+        filled = False
+        if group.count() > 0:
+            inputs = group.first.locator("input:visible")
+            if inputs.count() >= 1:
+                inputs.nth(0).fill(name)
+                if first_name and inputs.count() >= 2:
+                    inputs.nth(1).fill(first_name)
+                filled = True
+        if not filled:
+            last = _first_visible(
                 page,
                 [
-                    page.get_by_label(re.compile(r"first\s*name", re.I)),
-                    page.locator("input[name*=first i], input[id*=first i]"),
+                    page.locator("input[name*=last i], input[id*=last i]"),
+                    page.get_by_role("textbox", name=re.compile(r"last\s*name", re.I)),
                 ],
             )
-            if first is not None:
-                first.fill(first_name)
+            if last is None:
+                raise NyscefError("could not find the last-name field on the search form")
+            last.fill(name)
+            if first_name:
+                first = _first_visible(
+                    page,
+                    [
+                        page.locator("input[name*=first i], input[id*=first i]"),
+                        page.get_by_role("textbox", name=re.compile(r"first\s*name", re.I)),
+                    ],
+                )
+                if first is not None:
+                    first.fill(first_name)
 
     if page.locator("iframe[src*='captcha'], iframe[title*='captcha' i]").count() > 0:
         raise NyscefError("the search form is showing a captcha — manual search required")
@@ -155,23 +169,45 @@ def _fill_and_submit(page, name: str, party_type: str, first_name: str) -> None:
     page.wait_for_timeout(2000)
 
 
-def _read_results(page) -> str:
-    body_text = page.inner_text("body", timeout=15_000)
+NO_RESULTS_RE = re.compile(
+    r"no\s+(records|cases|results|matches|documents)|did\s+not\s+(match|return)"
+    r"|there\s+are\s+no|\b0\s+(records|results|cases)\b|nothing\s+found",
+    re.I,
+)
 
-    if re.search(r"no\s+(records|cases|results|matches)", body_text, re.I):
-        return "CLEAR — no cases found"
 
-    # Pull the largest data table on the results page.
-    best_rows = []
+def _collect_rows(page):
+    """Best row set on the page: real <table>, ARIA rows, or row-styled divs."""
+    best = []
     for table in page.locator("table").all():
         try:
             rows = table.locator("tr").all()
         except Exception:
             continue
-        if len(rows) > len(best_rows):
-            best_rows = rows
+        if len(rows) > len(best):
+            best = rows
+    aria_rows = page.get_by_role("row").all()
+    if len(aria_rows) > len(best):
+        best = aria_rows
+    div_rows = page.locator("div[class*='Row' i]").all()
+    if len(div_rows) > len(best):
+        best = div_rows
+    return best
+
+
+def _read_results(page) -> str:
+    # Results may render asynchronously; poll instead of reading once.
+    best_rows = []
+    for _ in range(10):
+        body_text = page.inner_text("body", timeout=15_000)
+        if NO_RESULTS_RE.search(body_text):
+            return "CLEAR — no cases found"
+        best_rows = _collect_rows(page)
+        if len(best_rows) >= 2:
+            break
+        page.wait_for_timeout(2000)
     if len(best_rows) < 2:
-        # No table and no explicit no-results text: don't guess.
+        # No rows and no explicit no-results text: don't guess.
         raise NyscefError("could not identify a results table on the results page")
 
     lines = []
@@ -191,5 +227,25 @@ def _dump_debug(page, debug_dir: Path | None) -> None:
         debug_dir.mkdir(parents=True, exist_ok=True)
         (debug_dir / "page.html").write_text(page.content(), encoding="utf-8")
         page.screenshot(path=str(debug_dir / "page.png"), full_page=True)
+        print(f"[debug] saved {debug_dir}/page.html and page.png")
+    except Exception:
+        pass
+    try:
+        print("[debug] --- page structure at time of failure ---")
+        print("[debug] title:", page.title(), "| url:", page.url)
+        for sel in (
+            "input", "select", "button", "[role=group]", "[role=row]",
+            "table", "div[class*='Row' i]", "iframe",
+        ):
+            els = page.locator(sel)
+            n = els.count()
+            print(f"[debug] {sel}: {n}")
+            for j in range(min(n, 8)):
+                try:
+                    html = els.nth(j).evaluate("el => el.outerHTML.slice(0, 180)")
+                    print("[debug]    ", " ".join(html.split()))
+                except Exception:
+                    pass
+        print("[debug] --- end page structure ---")
     except Exception:
         pass
