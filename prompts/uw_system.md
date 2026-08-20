@@ -79,8 +79,18 @@ Formatting notes:
 - If there are no active positions, write "Loans: None found" and state the advance would come in 1ST POSITION with 0% revenue remit.
 - In BALANCES, use the actual month names. Only mention what exists: a month with no low days and no negative days is "0 LOW 0 NEG"; a month with only negatives can read "<n> NEG DAYS".
 - If there are no deductions, notes, or transfers, say so briefly ("Deductions: none", "NOTES: nothing unusual") rather than omitting the section.
-- NYSCEF (New York court records) cannot be searched from inside this system yet. Until the court search is wired in, output exactly: `NYSCEF - NOT CHECKED (manual search required: business name + applicant name)`. Never output "CLEAR" for a search that was not performed.
 - Keep it as tight as the example — this is a working document for funders, not an essay.
+
+# NYSCEF court search
+
+Before finalizing the analysis, search NYSCEF (New York courts) with the `search_nyscef` tool:
+- One **business** search for the merchant's legal name as it appears on the statements/application (and another for the DBA if it differs).
+- One **individual** search for each applicant/owner named in the submission.
+
+Reporting rules:
+- Every search comes back clean → `NYSCEF - CLEAR`.
+- Cases found → list them under the NYSCEF line (case number, party, case type if shown). Judgments, pending MCA-related suits, or confessions of judgment are decline-level findings — reflect them in the Suggestion line.
+- Any search fails or errors → `NYSCEF - SEARCH FAILED (manual search required: business name + applicant name)`. **Never output CLEAR for a search that did not actually run.**
 
 # Suggestion rules
 

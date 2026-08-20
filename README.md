@@ -33,6 +33,7 @@ broker/ops email w/ statements ──> monitored inbox (IMAP)
 
    ```bash
    pip install -r requirements.txt
+   playwright install chromium   # browser used for NYSCEF court searches
    ```
 
 2. **Configure** — copy `.env.example` to `.env` and fill in:
@@ -85,9 +86,22 @@ Or as a systemd service running `python -m funnded_uw run`.
 
 - **Only unread emails are processed.** Going live won't touch the existing
   read backlog; mark anything as unread to (re)process it.
-- **NYSCEF / DataMerch are not searched yet** — the analysis prints
-  `NYSCEF - NOT CHECKED` rather than falsely claiming "clear". Court search
-  integration is planned once the search URL/account is provided.
+- **NYSCEF is searched automatically** during each analysis: Claude extracts
+  the business legal name and applicant name from the submission and searches
+  https://iapps.courts.state.ny.us/nyscef/CaseSearch?TAB=name through a real
+  headless browser (the site blocks plain HTTP clients). Test it standalone:
+
+  ```bash
+  python -m funnded_uw nyscef "SOME BUSINESS LLC"
+  python -m funnded_uw nyscef "Smith" --individual --first John
+  python -m funnded_uw nyscef "SOME BUSINESS LLC" --debug   # dump HTML+screenshot on failure
+  ```
+
+  If a search fails (site change, IP block), the analysis prints
+  `NYSCEF - SEARCH FAILED (manual search required)` — it never claims CLEAR
+  for a search that didn't run.
+- **DataMerch is not checked** — needs a DataMerch API membership; can be
+  added the same way as NYSCEF once credentials exist.
 - **Cost**: a typical 3-month statement package runs roughly $1–3 per deal on
   claude-opus-5.
 - The prompt treats email bodies/attachments as untrusted data and flags

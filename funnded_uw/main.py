@@ -136,6 +136,12 @@ def main(argv=None) -> None:
     sub.add_parser("once", help="process the inbox once and exit")
     p_an = sub.add_parser("analyze", help="analyze local statement files (no email involved)")
     p_an.add_argument("files", nargs="+", help="bank statement PDFs/images")
+    p_ny = sub.add_parser("nyscef", help="test a NYSCEF court search by itself")
+    p_ny.add_argument("name", help="business name, or LAST name with --individual")
+    p_ny.add_argument("--individual", action="store_true", help="search a person instead of a business")
+    p_ny.add_argument("--first", default="", help="first name (with --individual)")
+    p_ny.add_argument("--show", action="store_true", help="show the browser window (debugging)")
+    p_ny.add_argument("--debug", action="store_true", help="dump page HTML + screenshot to nyscef_debug/ on failure")
 
     args = parser.parse_args(argv)
     cfg = Config.from_env()
@@ -146,6 +152,18 @@ def main(argv=None) -> None:
         cmd_run(cfg, once=True)
     elif args.command == "analyze":
         cmd_analyze(cfg, args.files)
+    elif args.command == "nyscef":
+        from .nyscef import search_party
+
+        print(
+            search_party(
+                args.name,
+                party_type="individual" if args.individual else "business",
+                first_name=args.first,
+                headless=not args.show,
+                debug_dir=Path("nyscef_debug") if args.debug else None,
+            )
+        )
 
 
 if __name__ == "__main__":
