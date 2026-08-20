@@ -6,6 +6,7 @@ from pathlib import Path
 
 from anthropic import Anthropic
 
+from . import console
 from .analyzer import UnprocessableSubmission, analyze
 from .config import Config
 from .inbox import Attachment, Inbox, Submission
@@ -23,64 +24,77 @@ MANUAL_REVIEW_NOTE = (
 
 
 def process_submission(cfg, client, store, inbox, sub):
+    """Returns one of: already, skipped, done, failed, retry."""
     label = sub.subject or sub.message_id or "(no subject)"
 
     if sub.message_id and store.is_finished(sub.message_id):
         inbox.mark_seen(sub.uid)
-        return
+        return "already"
 
     if cfg.subject_filter and cfg.subject_filter.lower() not in sub.subject.lower():
-        log.info("Skipping (subject filter): %s", label)
+        console.step(f"Skipping (subject doesn't match filter): {label}")
         store.record(sub.message_id, "skipped", sub.subject)
         inbox.mark_seen(sub.uid)
-        return
+        return "skipped"
 
     if not sub.attachments:
-        log.info("Skipping (no statement attachments): %s", label)
+        console.step(f"Skipping (no statement attachments): {label}")
         store.record(sub.message_id, "skipped", sub.subject, "no PDF/image attachments")
         inbox.mark_seen(sub.uid)
-        return
+        return "skipped"
 
-    log.info("Analyzing deal: %s (%d attachments)", label, len(sub.attachments))
+    console.header(f"DEAL: {label}")
+    console.step(f"From: {sub.from_addr}")
+    start = time.time()
     try:
         analysis = analyze(client, cfg, sub)
     except UnprocessableSubmission as exc:
-        log.warning("Needs manual review: %s — %s", label, exc)
-        deliver(cfg, sub, MANUAL_REVIEW_NOTE.format(reason=exc))
+        console.fail(f"Can't auto-analyze: {exc}")
+        deliver(cfg, sub, MANUAL_REVIEW_NOTE.format(reason=exc), notice=True)
         store.record(sub.message_id, "failed", sub.subject, str(exc))
         inbox.mark_seen(sub.uid)
-        return
+        return "failed"
     except Exception as exc:
         attempts = store.bump_attempts(sub.message_id, sub.subject, str(exc))
         if attempts >= MAX_ATTEMPTS:
-            log.error("Giving up after %d attempts: %s — %s", attempts, label, exc)
-            deliver(cfg, sub, MANUAL_REVIEW_NOTE.format(reason=f"repeated errors ({exc})"))
+            console.fail(f"Failed {attempts} times, giving up: {exc}")
+            deliver(cfg, sub, MANUAL_REVIEW_NOTE.format(reason=f"repeated errors ({exc})"), notice=True)
             store.record(sub.message_id, "failed", sub.subject, str(exc))
             inbox.mark_seen(sub.uid)
-        else:
-            # Leave unseen so the next poll retries it.
-            log.warning("Attempt %d/%d failed, will retry: %s — %s", attempts, MAX_ATTEMPTS, label, exc)
-        return
+            return "failed"
+        console.warn(f"Attempt {attempts}/{MAX_ATTEMPTS} failed — will retry automatically: {exc}")
+        return "retry"
 
     deliver(cfg, sub, analysis)
+    mins, secs = divmod(int(time.time() - start), 60)
+    if cfg.dry_run:
+        console.ok(f"Analysis done in {mins}m {secs}s (dry run — printed above, nothing emailed)")
+    else:
+        console.ok(f"Reply sent to {sub.reply_addr} ({mins}m {secs}s)")
     store.record(sub.message_id, "done", sub.subject)
     inbox.mark_seen(sub.uid)
-    log.info("Replied with UW analysis: %s", label)
+    return "done"
 
 
-def deliver(cfg, sub, body: str) -> None:
+def deliver(cfg, sub, body: str, notice: bool = False) -> None:
     if cfg.dry_run:
         print(f"\n===== DRY RUN — would reply to {sub.reply_addr} re: {sub.subject!r} =====")
         print(body)
         print("===== END DRY RUN =====\n")
     else:
+        console.step("Sending failure notice by email..." if notice else "Emailing the analysis back on the thread...")
         send_reply(cfg, sub, body)
+        if notice:
+            console.warn(f"Failure notice sent to {sub.reply_addr}")
 
 
-def poll_once(cfg, client, store) -> None:
+def poll_once(cfg, client, store) -> dict:
+    counts = {"done": 0, "failed": 0, "retry": 0, "skipped": 0, "already": 0}
     with Inbox(cfg) as inbox:
         for sub in inbox.fetch_unseen():
-            process_submission(cfg, client, store, inbox, sub)
+            outcome = process_submission(cfg, client, store, inbox, sub)
+            counts[outcome] += 1
+    return counts
 
 
 def cmd_run(cfg, once: bool) -> None:
@@ -88,13 +102,27 @@ def cmd_run(cfg, once: bool) -> None:
     client = Anthropic(api_key=cfg.anthropic_api_key or None, max_retries=4)
     store = Store(cfg.db_path)
     if cfg.dry_run:
-        log.warning("DRY_RUN is on — analyses will be printed, not emailed. Set DRY_RUN=false to go live.")
+        console.warn("DRY RUN mode — analyses are printed here, no emails are sent. Set DRY_RUN=false in .env to go live.")
+    else:
+        console.ok("LIVE mode — finished analyses are emailed back automatically.")
+    if not once:
+        console.step(f"Watching {cfg.imap_folder} for new deals (checking every {cfg.poll_seconds}s — press Ctrl+C to stop)")
     while True:
         try:
-            poll_once(cfg, client, store)
-        except Exception:
-            log.exception("Poll failed; retrying in %ds", cfg.poll_seconds)
+            counts = poll_once(cfg, client, store)
+        except Exception as exc:
+            console.fail(f"Mailbox check failed ({exc}) — retrying in {cfg.poll_seconds}s")
+            counts = None
         if once:
+            if counts is not None:
+                handled = sum(counts.values()) - counts["already"]
+                if handled == 0:
+                    console.summary("No new deals in the inbox (only already-handled or read emails).")
+                else:
+                    console.summary(
+                        f"Run complete: {counts['done']} replied, {counts['failed']} failed, "
+                        f"{counts['retry']} will retry next run, {counts['skipped']} skipped"
+                    )
             return
         time.sleep(cfg.poll_seconds)
 
@@ -179,7 +207,9 @@ def cmd_analyze(cfg, files) -> None:
 
 
 def main(argv=None) -> None:
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    logging.basicConfig(level=logging.WARNING, format="%(asctime)s %(levelname)s %(message)s")
+    logging.getLogger("httpx").setLevel(logging.ERROR)
+    logging.getLogger("anthropic").setLevel(logging.WARNING)
     parser = argparse.ArgumentParser(prog="funnded_uw", description="Automated MCA underwriting analysis")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="watch the inbox continuously and reply to new deals")

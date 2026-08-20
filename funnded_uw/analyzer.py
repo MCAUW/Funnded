@@ -8,9 +8,11 @@ NYSCEF line of the analysis.
 import base64
 import logging
 import os
+import time
 
 from anthropic import Anthropic
 
+from . import console
 from .config import build_system_prompt
 
 log = logging.getLogger("funnded_uw")
@@ -72,11 +74,18 @@ def run_nyscef_tool(tool_input: dict) -> tuple:
     first_name = (tool_input.get("first_name") or "").strip()
     if not name:
         return ("missing 'name'", True)
+    display = f"{first_name} {name}".strip()
+    console.step(f"NYSCEF court search ({party_type}): {display}")
     try:
-        log.info("NYSCEF search (%s): %s %s", party_type, first_name, name)
-        return (search_party(name, party_type=party_type, first_name=first_name), False)
+        result = search_party(name, party_type=party_type, first_name=first_name)
+        first_line = result.strip().splitlines()[0] if result.strip() else "no result"
+        if first_line.upper().startswith("CLEAR"):
+            console.ok(f"NYSCEF {display}: CLEAR")
+        else:
+            console.warn(f"NYSCEF {display}: {first_line}")
+        return (result, False)
     except NyscefError as exc:
-        log.warning("NYSCEF search failed for %r: %s", name, exc)
+        console.fail(f"NYSCEF search failed for {display}: {exc}")
         return (f"NYSCEF search failed: {exc} — report SEARCH FAILED, do not report CLEAR", True)
 
 
@@ -146,12 +155,24 @@ def _stream_message(client: Anthropic, cfg, system_prompt: str, messages: list):
     else:
         stream_ctx = client.messages.stream(**kwargs)
     with stream_ctx as stream:
+        start = last_note = time.time()
+        for _event in stream:
+            now = time.time()
+            if now - last_note >= 20:
+                console.step(f"still working... ({int(now - start)}s elapsed)")
+                last_note = now
         return stream.get_final_message()
 
 
 def analyze(client: Anthropic, cfg, submission) -> str:
     system_prompt = build_system_prompt()
-    messages = [{"role": "user", "content": build_user_content(submission)}]
+    content = build_user_content(submission)
+    total_mb = sum(len(a.data) for a in submission.attachments) / 1024 / 1024
+    console.step(
+        f"Sending {len(submission.attachments)} statements ({total_mb:.1f} MB) to Claude "
+        "— reading every page, this can take a few minutes"
+    )
+    messages = [{"role": "user", "content": content}]
 
     for _ in range(MAX_TOOL_ROUNDS):
         message = _stream_message(client, cfg, system_prompt, messages)
@@ -173,6 +194,7 @@ def analyze(client: Anthropic, cfg, submission) -> str:
                         }
                     )
             messages.append({"role": "user", "content": results})
+            console.step("Court searches done — writing the UW analysis")
             continue
 
         if message.stop_reason == "refusal":
