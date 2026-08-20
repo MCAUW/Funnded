@@ -99,6 +99,56 @@ def cmd_run(cfg, once: bool) -> None:
         time.sleep(cfg.poll_seconds)
 
 
+def cmd_check(cfg) -> None:
+    """Verify mailbox credentials and connectivity, with actionable errors."""
+    import imaplib
+    import smtplib
+
+    cfg.require_email()
+    ok = True
+
+    print(f"IMAP {cfg.imap_host}:{cfg.imap_port} as {cfg.email_address} ... ", end="", flush=True)
+    try:
+        conn = imaplib.IMAP4_SSL(cfg.imap_host, cfg.imap_port)
+        conn.login(cfg.email_address, cfg.email_password)
+        status, _ = conn.select(cfg.imap_folder, readonly=True)
+        if status != "OK":
+            raise RuntimeError(f"folder {cfg.imap_folder!r} not found")
+        _, data = conn.uid("search", None, "UNSEEN")
+        unseen = len(data[0].split()) if data and data[0] else 0
+        conn.logout()
+        print(f"OK ({unseen} unread emails in {cfg.imap_folder})")
+    except Exception as exc:
+        ok = False
+        print(f"FAILED\n  -> {exc}")
+        if "application-specific" in str(exc).lower() or "support.google.com" in str(exc):
+            print(
+                "  -> Gmail rejects regular passwords for IMAP. Create an App Password:\n"
+                "     Google Account -> Security -> 2-Step Verification (must be ON)\n"
+                "     -> App passwords -> generate one and put it in EMAIL_PASSWORD."
+            )
+
+    print(f"SMTP {cfg.smtp_host}:{cfg.smtp_port} as {cfg.email_address} ... ", end="", flush=True)
+    try:
+        if cfg.smtp_port == 465:
+            smtp = smtplib.SMTP_SSL(cfg.smtp_host, cfg.smtp_port, timeout=30)
+        else:
+            smtp = smtplib.SMTP(cfg.smtp_host, cfg.smtp_port, timeout=30)
+            smtp.starttls()
+        smtp.login(cfg.email_address, cfg.email_password)
+        smtp.quit()
+        print("OK")
+    except Exception as exc:
+        ok = False
+        print(f"FAILED\n  -> {exc}")
+
+    print(f"Anthropic API key ... {'set' if cfg.anthropic_api_key else 'MISSING (set ANTHROPIC_API_KEY)'}")
+    if not cfg.anthropic_api_key:
+        ok = False
+
+    raise SystemExit(0 if ok else 1)
+
+
 def cmd_analyze(cfg, files) -> None:
     """Dry-run a set of local statement files without touching email."""
     client = Anthropic(api_key=cfg.anthropic_api_key or None)
@@ -134,6 +184,7 @@ def main(argv=None) -> None:
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("run", help="watch the inbox continuously and reply to new deals")
     sub.add_parser("once", help="process the inbox once and exit")
+    sub.add_parser("check", help="test IMAP/SMTP credentials and connectivity")
     p_an = sub.add_parser("analyze", help="analyze local statement files (no email involved)")
     p_an.add_argument("files", nargs="+", help="bank statement PDFs/images")
     p_ny = sub.add_parser("nyscef", help="test a NYSCEF court search by itself")
@@ -150,6 +201,8 @@ def main(argv=None) -> None:
         cmd_run(cfg, once=False)
     elif args.command == "once":
         cmd_run(cfg, once=True)
+    elif args.command == "check":
+        cmd_check(cfg)
     elif args.command == "analyze":
         cmd_analyze(cfg, args.files)
     elif args.command == "nyscef":

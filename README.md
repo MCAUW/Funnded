@@ -48,6 +48,15 @@ broker/ops email w/ statements ──> monitored inbox (IMAP)
    team uses. This file is injected into the underwriting prompt on every deal
    and can be edited any time without restarting.
 
+4. **Verify the connection**:
+
+   ```bash
+   python -m funnded_uw check
+   ```
+
+   This tests the IMAP login, the SMTP login, and that an API key is set,
+   and prints exactly what to fix if anything fails.
+
 ## Test before going live
 
 Analyze local statement files with no email involved:
